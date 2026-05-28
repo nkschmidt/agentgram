@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/schmidt/agentgram/internal/backend"
@@ -15,9 +16,10 @@ import (
 //
 // Events are parsed in events.go, JSON models — in models.go.
 type Backend struct {
-	lazy    *LazyServer
-	workDir func() string
-	client  *Client
+	lazy      *LazyServer
+	workDir   func() string
+	mcpConfig func() []byte // bot's MCP server as an opencode.json doc (may be nil)
+	client    *Client
 
 	mu        sync.Mutex
 	sessionID string
@@ -46,13 +48,23 @@ type opPart struct {
 
 // New returns a Backend factory. provider is read on every SendMessage
 // for the given userID — each user has their own working directory.
-func New(lazy *LazyServer, provider func(userID int64) string) backend.Factory {
+//
+// mcpConfig, if non-nil, returns the opencode.json document (for the given
+// user) that registers the bot's MCP server. Since one `opencode serve` is
+// shared by all users, the only per-user hook is the project config in each
+// user's working directory — we write it on Start so opencode picks it up when
+// it resolves the session's directory.
+func New(lazy *LazyServer, provider func(userID int64) string, mcpConfig func(userID int64) []byte) backend.Factory {
 	return func(userID int64) backend.Backend {
-		return &Backend{
+		b := &Backend{
 			lazy:    lazy,
 			workDir: func() string { return provider(userID) },
 			parts:   map[string]opPart{},
 		}
+		if mcpConfig != nil {
+			b.mcpConfig = func() []byte { return mcpConfig(userID) }
+		}
+		return b
 	}
 }
 
@@ -72,6 +84,16 @@ func (b *Backend) Start(ctx context.Context) error {
 	subCtx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel
 	b.mu.Unlock()
+
+	// Write the per-user MCP config into the working directory before creating
+	// the session, so opencode picks it up while resolving the directory.
+	if b.mcpConfig != nil {
+		if wd := b.workDir(); wd != "" {
+			if err := writeMCPConfig(wd, b.mcpConfig()); err != nil {
+				log.Printf("opencode: mcp config: %v", err)
+			}
+		}
+	}
 
 	sessionID, err := b.client.CreateSession(ctx)
 	if err != nil {

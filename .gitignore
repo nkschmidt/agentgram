@@ -2,3 +2,5 @@
 .env.local
 settings.json
 .tmp
+opencode.json
+.DS_Store

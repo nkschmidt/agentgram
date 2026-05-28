@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -32,6 +33,12 @@ type Service struct {
 	api      *tgbotapi.BotAPI
 	access   AccessGate
 	composer *composer
+
+	// chatIDs remembers the chat each user last wrote from, so the MCP Sender
+	// (SendPhoto/SendDocument) can deliver files even though the agent only
+	// knows the userID. For a private chat the chat id equals the user id —
+	// that's also the fallback before anything is recorded.
+	chatIDs sync.Map // userID -> chatID
 }
 
 // New creates the service and immediately authorizes with Telegram — so we
@@ -115,6 +122,7 @@ func (s *Service) handleMessage(ctx context.Context, m *tgbotapi.Message, d Disp
 	if !s.authorize(m.From.ID, m.From.UserName) {
 		return
 	}
+	s.chatIDs.Store(m.From.ID, m.Chat.ID)
 	// composer assembles the text from Text/Caption + downloads Document/Photo/
 	// Voice/Audio and adds the corresponding tags (with local path for
 	// documents/images and a transcription for audio). If there's
@@ -142,6 +150,7 @@ func (s *Service) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery,
 	if q.Message == nil {
 		return
 	}
+	s.chatIDs.Store(q.From.ID, q.Message.Chat.ID)
 	err := d.DispatchCallback(ctx, router.Callback{
 		ID:        q.ID,
 		Data:      q.Data,

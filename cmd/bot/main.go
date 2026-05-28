@@ -18,6 +18,7 @@ import (
 	"github.com/schmidt/agentgram/internal/backend/opencode"
 	"github.com/schmidt/agentgram/internal/bot"
 	"github.com/schmidt/agentgram/internal/command"
+	"github.com/schmidt/agentgram/internal/mcp"
 	"github.com/schmidt/agentgram/internal/router"
 	"github.com/schmidt/agentgram/internal/session"
 	"github.com/schmidt/agentgram/internal/settings"
@@ -65,16 +66,28 @@ func main() {
 	}
 	replier := botSvc.Replier()
 
+	// Local MCP server: lets agents push files to the user's chat via the
+	// send_photo / send_document tools. botSvc satisfies mcp.Sender structurally
+	// (tgbotapi stays inside internal/bot). Per-user routing is by a Bearer token
+	// the backends inject into each agent's MCP client config.
+	mcpSrv := mcp.NewServer(botSvc)
+	if err := mcpSrv.Listen("127.0.0.1:0"); err != nil {
+		log.Printf("warn: mcp server not started, agents can't send files: %v", err)
+	} else {
+		log.Printf("mcp server: ready at %s", mcpSrv.URL())
+	}
+
 	// Backend registry. claude runs via CLI per-message.
 	// opencode talks to a local `opencode serve`; we start the server itself
 	// lazily — only when the user first selects opencode in /new_session.
 	// Working directory — from settings, read on every process request.
+	// Each backend also gets the bot's MCP server wired in per user.
 	backendReg := backend.NewRegistry()
-	backendReg.Register(claude.Name, claude.New(store.WorkDirOf))
+	backendReg.Register(claude.Name, claude.New(store.WorkDirOf, mcpSrv.ClaudeMCPConfig))
 
 	opencodeLazy := opencode.NewLazyServer(4096, "127.0.0.1")
 	defer opencodeLazy.Shutdown()
-	backendReg.Register(opencode.Name, opencode.New(opencodeLazy, store.WorkDirOf))
+	backendReg.Register(opencode.Name, opencode.New(opencodeLazy, store.WorkDirOf, mcpSrv.OpencodeConfig))
 
 	// Forward-declare sessionMgr — it's needed by the closure inside StreamCoordinator
 	// (so the "⏹ Stop" button can send SIGINT to the process), but Manager itself

@@ -18,7 +18,7 @@ Modular architecture: adding a new backend / command / settings section doesn't 
 
 ## Architectural decisions
 
-- **Stack:** Go 1.24+, `go-telegram-bot-api/v5`, `joho/godotenv`. HTTP — stdlib, SSE parser is custom.
+- **Stack:** Go 1.25+ (bumped by the MCP go-sdk), `go-telegram-bot-api/v5`, `joho/godotenv`, `modelcontextprotocol/go-sdk` (local MCP server). HTTP — stdlib, SSE parser is custom.
 - **Access:** whitelist by `agentgram user_id`. If the whitelist is empty, the first writer is added automatically (autoseed). Messages from non-allowed users are dropped at the entry point.
 - **Settings storage:** JSON file `settings.json` in the bot's cwd. Fields: `allowed_users`, `work_dirs` (per-user), `whisper_bin`, `whisper_model`. Thread-safe Store.
 - **Working directory:** per-user. On change, the callback `OnWorkDirChange(userID)` restarts only that user's session.
@@ -26,6 +26,10 @@ Modular architecture: adding a new backend / command / settings section doesn't 
   - `claude` — per-message `claude -p --output-format stream-json --verbose [--resume <id>]`. Multi-turn via `--resume`. Interrupt = SIGINT through `cmd.Cancel`.
   - `opencode` — HTTP API to a local `opencode serve`. **LazyServer** — one process for all users, started on the first opencode selection. Each user gets their own session on the server. `directory` is passed as a query parameter on every request. SSE for stream, POST `/message` is blocking (no timeout). Interrupt = POST `/abort`.
 - **Response streaming:** one message in the chat, updated via Edit. Typing indicator (re-sent every 4s). An ⏹ Stop button hangs below the message (SIGINT for claude, POST `/abort` for opencode; launched in a goroutine — doesn't block the UI). The final is unified: `Chunk{Text, Final: true}` replaces the accumulated progress.
+- **Agent → user files (MCP):** the bot runs a local MCP server (`internal/mcp`, official go-sdk over Streamable HTTP) giving agents `send_photo` / `send_document` tools — an agent can push a generated image/file straight into the chat, separate from its text answer. A tool call carries no Telegram identity, so the bot mints a stable per-user Bearer token and the backends inject it into each agent's MCP client config; `getServer` resolves token→userID per request. Delivery goes through `mcp.Sender`, implemented in `internal/bot` (tgbotapi stays locked there). Wiring differs per backend:
+  - `claude` — per-message subprocess, so per-user `--mcp-config <inline JSON>` + `--allowedTools mcp__agentgram__*`. Fully multi-user-safe.
+  - `opencode` — one shared `opencode serve`, so the only per-user hook is the project config: on `Start` the backend writes/merges `<workdir>/opencode.json` with the user's remote-MCP entry. Verified: opencode reads project MCP config per `directory` and connects per session, so this is multi-user-safe too.
+  - **Duplicate suppression:** weak models (seen with opencode + qwen) sometimes emit the *same* `tools/call` twice in one turn (two distinct JSON-RPC ids, not a transport retry), so the file was delivered twice. `mcp.Server` collapses identical sends (same userID/tool/path/caption within `dedupWindow`) — delivers once, returns OK for the duplicate. claude doesn't double, so it's unaffected.
 - **User attachments:** Document / Photo / Voice / Audio are downloaded to `<workdir>/.tmp/` (if workdir is set) or `os.TempDir()/agentgram/<userID>/`. The path goes into the prompt, the agent reads them via the Read tool. Voice is transcribed via ASR (whisper.cpp). The binary and model live in Settings; main does autodetect on startup, the user changes them via `/settings`.
 - **Polling:** every update is handled in **a separate goroutine** — a long-running `Backend.Send` (e.g. a blocking POST to opencode) doesn't block update reception, the ⏹ button always works.
 - **`/restart`:** hard `syscall.Exec` with no confirmation. The notification Send and exec run in goroutines so the command fires even if something is stuck.
@@ -73,6 +77,16 @@ internal/bot/               — tgbotapi glue (the only package with tgbotapi):
     composer.go             — Text/Caption + Document/Photo/Voice/Audio → prompt.
                               Downloads into `<workdir>/.tmp/` or TempDir,
                               voice goes through Transcriber.
+    sender.go               — Service implements mcp.Sender (SendPhoto/
+                              SendDocument) + userID→chatID tracking. Lets the
+                              MCP server push files back to the user's chat.
+internal/mcp/               — local MCP server (official go-sdk, Streamable
+                              HTTP) exposing send_photo / send_document to the
+                              agents. Per-user routing: TokenFor(userID) mints a
+                              Bearer token, getServer(*http.Request) resolves
+                              token→userID and returns a per-user server whose
+                              tools call Sender. ClaudeMCPConfig / OpencodeConfig
+                              build each backend's MCP client config.
 internal/command/           — command layer:
     replier.go              — Replier interface (Send/Edit/SendHTML/EditHTML/
                               Delete/Answer/Typing).

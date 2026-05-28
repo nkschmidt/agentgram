@@ -1,6 +1,6 @@
 # agentgram — Telegram bot wrapper for CLI agents
 
-[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go)](https://go.dev/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go)](https://go.dev/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
 A Telegram bot that hooks [Claude Code](https://claude.ai/code) and [OpenCode](https://github.com/opencode-ai/opencode) into Telegram — chat with AI agents straight from your messenger and drive your projects from any device.
 
@@ -36,6 +36,24 @@ Bot: Done. Moved authentication into package auth, updated imports, all 12 tests
 - **Documents and photos** — downloaded to the server, the path is passed to the agent.
 - **Voice messages** — transcribed via whisper.cpp right inside the bot.
 
+### Files from the agent (MCP)
+
+The bot runs a local [MCP](https://modelcontextprotocol.io/) server that gives agents two extra tools, so they can push files **back** to your chat — not just reply with text:
+
+- **`send_photo`** — send an image inline as a photo (with optional caption).
+- **`send_document`** — send any file as a downloadable attachment.
+
+```
+You: Plot the sales data from report.csv and send me the chart
+Bot: 📊 Built the chart from 1,240 rows.
+     [photo: sales_q3.png]  ← delivered via send_photo
+```
+
+Routing is per-user: the bot mints a Bearer token per user and wires it into each backend's MCP config, so a tool call always lands in the right chat. Works for both backends:
+
+- **Claude Code** — token passed per invocation via `--mcp-config` + `--allowedTools`.
+- **OpenCode** — registered as a remote MCP server in a per-workdir `opencode.json` (the bot writes/merges it on session start).
+
 ### Settings
 
 - **Working directories** — per-user, folder browser via inline keyboard, up to 100 subdirectories per screen.
@@ -54,7 +72,7 @@ Bot: Done. Moved authentication into package auth, updated imports, all 12 tests
 
 ### Requirements
 
-- **Go 1.24+**
+- **Go 1.25+**
 - **Telegram Bot Token** — get one from [@BotFather](https://t.me/botfather)
 - **Claude Code CLI** — [install](https://claude.ai/code) (for the claude backend)
 - **OpenCode** — [install](https://github.com/opencode-ai/opencode) (for the opencode backend)
@@ -103,7 +121,8 @@ internal/backend             — Backend interface + factory registry
   toolfmt                    — tool-call rendering
 internal/session             — per-user sessions, auto-stop, chunk handler
 internal/command             — commands, streaming, callbacks, state machine
-internal/bot                 — tgbotapi glue: service, replier, composer
+internal/bot                 — tgbotapi glue: service, replier, composer, sender
+internal/mcp                 — local MCP server: send_photo / send_document
 internal/asr                 — transcription (whisper.cpp + noop)
 ```
 

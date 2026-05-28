@@ -35,7 +35,8 @@ import (
 const Name = "claude"
 
 type Backend struct {
-	workDir func() string // current working directory, read on every Send
+	workDir func() string   // current working directory, read on every Send
+	mcpArgs func() []string // extra CLI args wiring the bot's MCP server (may be nil)
 
 	mu        sync.Mutex
 	sessionID string             // issued by claude itself, used for --resume
@@ -48,11 +49,29 @@ type Backend struct {
 
 // New returns a factory. provider is read on every process launch for
 // the given userID — each user can have their own working directory.
-func New(provider func(userID int64) string) backend.Factory {
+//
+// mcpConfig, if non-nil, supplies the bot's local MCP server to claude: for the
+// given user it returns the inline JSON for --mcp-config and the tool names to
+// whitelist via --allowedTools. It's read on every Send, so it works even if
+// the MCP server became ready after the factory was built. A claude process is
+// per-user, so each user's token stays isolated.
+func New(provider func(userID int64) string, mcpConfig func(userID int64) (configJSON string, allowedTools []string)) backend.Factory {
 	return func(userID int64) backend.Backend {
-		return &Backend{
+		b := &Backend{
 			workDir: func() string { return provider(userID) },
 		}
+		if mcpConfig != nil {
+			b.mcpArgs = func() []string {
+				cfg, tools := mcpConfig(userID)
+				if cfg == "" {
+					return nil
+				}
+				// --allowedTools is additive: it whitelists our MCP tools
+				// (headless mode can't prompt) without disabling the others.
+				return []string{"--mcp-config", cfg, "--allowedTools", strings.Join(tools, ",")}
+			}
+		}
+		return b
 	}
 }
 
@@ -85,6 +104,9 @@ func (b *Backend) Send(input string) error {
 	}
 	if b.sessionID != "" {
 		args = append(args, "--resume", b.sessionID)
+	}
+	if b.mcpArgs != nil {
+		args = append(args, b.mcpArgs()...)
 	}
 
 	ctx, cancel := context.WithCancel(b.rootCtx)
