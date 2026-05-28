@@ -1,0 +1,100 @@
+// Package toolfmt — common formatting of tool calls into strings for chat.
+// Used by the claude and opencode adapters: both parse different JSON
+// formats, but the visual representation in Telegram must be unified.
+//
+// Principle: tool name → emoji (case-insensitive), input → short
+// "label" (file_path / command / pattern, etc). We don't show raw
+// JSON objects — they're almost always unreadable in chat.
+package toolfmt
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+// Tool names from different CLIs differ in case (claude — PascalCase,
+// opencode — lowercase). We store lowercase, normalize input on lookup.
+var toolEmoji = map[string]string{
+	"read":         "📖",
+	"write":        "✍️",
+	"edit":         "✏️",
+	"notebookedit": "📓",
+	"bash":         "💻",
+	"bashoutput":   "💻",
+	"glob":         "📁",
+	"grep":         "🔍",
+	"webfetch":     "🌐",
+	"websearch":    "🔎",
+	"task":         "🧩",
+	"todowrite":    "📝",
+	"list":         "📋",
+	"ls":           "📋",
+}
+
+// ToolUse renders a tool call into a string for chat.
+// For example: "📖 Read · /path/to/file" or "💻 Bash · ls -la".
+// If name is empty — "tool" is used. If there's no known emoji for name —
+// fallback "🔧". If input is empty/unintelligible — only the name is shown.
+func ToolUse(name string, input json.RawMessage) string {
+	if name == "" {
+		name = "tool"
+	}
+	emoji, ok := toolEmoji[strings.ToLower(name)]
+	if !ok {
+		emoji = "🔧"
+	}
+	if hint := summarize(input); hint != "" {
+		return fmt.Sprintf("%s %s · %s", emoji, name, Truncate(hint, 200))
+	}
+	return fmt.Sprintf("%s %s", emoji, name)
+}
+
+// summarize tries to extract the most useful field from input. First a
+// list of known keys (names differ between claude / opencode), then
+// fallback to any first non-empty string field.
+func summarize(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// input sometimes arrives as just a string.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil && s != "" {
+		return s
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	keys := []string{
+		"file_path", "filePath", "file", "filename",
+		"command", "cmd",
+		"pattern", "regex",
+		"path", "target", "directory", "dir",
+		"url", "uri",
+		"query",
+	}
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			if str, ok := v.(string); ok && str != "" {
+				return str
+			}
+		}
+	}
+	for _, v := range m {
+		if str, ok := v.(string); ok && str != "" {
+			return str
+		}
+	}
+	return ""
+}
+
+// Truncate truncates s to n characters, adding an ellipsis if needed.
+// TrimSpace is applied before the length check.
+func Truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
