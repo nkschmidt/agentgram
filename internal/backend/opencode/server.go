@@ -8,6 +8,8 @@ package opencode
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +30,7 @@ const Name = "opencode"
 type Server struct {
 	cmd     *exec.Cmd
 	baseURL string
+	token   string
 
 	mu      sync.Mutex
 	stopped bool
@@ -44,10 +47,13 @@ func StartServer(ctx context.Context, port int, hostname string) (*Server, error
 		port = 4096
 	}
 
+	token := generateToken()
+
 	cmd := exec.CommandContext(ctx, "opencode", "serve",
 		"--port", fmt.Sprintf("%d", port),
 		"--hostname", hostname,
 	)
+	cmd.Env = append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+token)
 	// SIGINT gives opencode a chance to shut down cleanly.
 	cmd.Cancel = func() error {
 		return cmd.Process.Signal(os.Interrupt)
@@ -79,7 +85,7 @@ func StartServer(ctx context.Context, port int, hostname string) (*Server, error
 
 	baseURL := fmt.Sprintf("http://%s", addr)
 	log.Printf("opencode server: ready at %s", baseURL)
-	return &Server{cmd: cmd, baseURL: baseURL}, nil
+	return &Server{cmd: cmd, baseURL: baseURL, token: token}, nil
 }
 
 // BaseURL — root URL of the server (http://host:port), without trailing slash.
@@ -99,6 +105,7 @@ func (s *Server) BaseURL() string { return s.baseURL }
 func (s *Server) Client(workDir func() string) *Client {
 	return &Client{
 		baseURL: s.baseURL,
+		token:   s.token,
 		http:    &http.Client{Timeout: 30 * time.Second},
 		stream:  &http.Client{Timeout: 0},
 		workDir: workDir,
@@ -147,4 +154,10 @@ func logPipe(label string, r io.Reader) {
 			return
 		}
 	}
+}
+
+func generateToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return "tg_" + hex.EncodeToString(b)
 }

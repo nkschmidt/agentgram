@@ -10,6 +10,12 @@ import (
 	"net/url"
 )
 
+// serverUser — username for HTTP Basic Auth. When OPENCODE_SERVER_PASSWORD
+// is set, opencode protects the server with Basic Auth; the username defaults
+// to "opencode" (overridable on the server via OPENCODE_SERVER_USERNAME, which
+// we don't set). The password is the token we pass in OPENCODE_SERVER_PASSWORD.
+const serverUser = "opencode"
+
 // Client — thin HTTP client for the opencode server.
 // workDir — provider of the current working directory. On every request
 // it's added to the URL as ?directory=... — that's the only way to tell
@@ -19,6 +25,7 @@ import (
 // stream — SSE subscription to /event, without timeout (long-lived).
 type Client struct {
 	baseURL string
+	token   string
 	http    *http.Client
 	stream  *http.Client
 	workDir func() string
@@ -69,6 +76,9 @@ func (c *Client) Events(ctx context.Context) (<-chan SSEEvent, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if c.token != "" {
+		req.SetBasicAuth(serverUser, c.token)
+	}
 	resp, err := c.stream.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("opencode events: %w", err)
@@ -108,6 +118,9 @@ func (c *Client) doWith(ctx context.Context, httpClient *http.Client, method, pa
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.token != "" {
+		req.SetBasicAuth(serverUser, c.token)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
