@@ -1,4 +1,4 @@
-# Project `tg` — Telegram bot wrapper for CLI agents
+# Project `agentgram` — Telegram bot wrapper for CLI agents
 
 Main project context. Read automatically at the start of every Claude Code session.
 
@@ -19,14 +19,14 @@ Modular architecture: adding a new backend / command / settings section doesn't 
 ## Architectural decisions
 
 - **Stack:** Go 1.24+, `go-telegram-bot-api/v5`, `joho/godotenv`. HTTP — stdlib, SSE parser is custom.
-- **Access:** whitelist by `tg user_id`. If the whitelist is empty, the first writer is added automatically (autoseed). Messages from non-allowed users are dropped at the entry point.
+- **Access:** whitelist by `agentgram user_id`. If the whitelist is empty, the first writer is added automatically (autoseed). Messages from non-allowed users are dropped at the entry point.
 - **Settings storage:** JSON file `settings.json` in the bot's cwd. Fields: `allowed_users`, `work_dirs` (per-user), `whisper_bin`, `whisper_model`. Thread-safe Store.
 - **Working directory:** per-user. On change, the callback `OnWorkDirChange(userID)` restarts only that user's session.
 - **Backend abstraction:** `Backend{Start, Send, Recv, Interrupt, Stop}` + `Factory(userID)` + `Registry`. Each adapter implements its own protocol.
   - `claude` — per-message `claude -p --output-format stream-json --verbose [--resume <id>]`. Multi-turn via `--resume`. Interrupt = SIGINT through `cmd.Cancel`.
   - `opencode` — HTTP API to a local `opencode serve`. **LazyServer** — one process for all users, started on the first opencode selection. Each user gets their own session on the server. `directory` is passed as a query parameter on every request. SSE for stream, POST `/message` is blocking (no timeout). Interrupt = POST `/abort`.
 - **Response streaming:** one message in the chat, updated via Edit. Typing indicator (re-sent every 4s). An ⏹ Stop button hangs below the message (SIGINT for claude, POST `/abort` for opencode; launched in a goroutine — doesn't block the UI). The final is unified: `Chunk{Text, Final: true}` replaces the accumulated progress.
-- **User attachments:** Document / Photo / Voice / Audio are downloaded to `<workdir>/.tmp/` (if workdir is set) or `os.TempDir()/tg-bot/<userID>/`. The path goes into the prompt, the agent reads them via the Read tool. Voice is transcribed via ASR (whisper.cpp). The binary and model live in Settings; main does autodetect on startup, the user changes them via `/settings`.
+- **User attachments:** Document / Photo / Voice / Audio are downloaded to `<workdir>/.tmp/` (if workdir is set) or `os.TempDir()/agentgram/<userID>/`. The path goes into the prompt, the agent reads them via the Read tool. Voice is transcribed via ASR (whisper.cpp). The binary and model live in Settings; main does autodetect on startup, the user changes them via `/settings`.
 - **Polling:** every update is handled in **a separate goroutine** — a long-running `Backend.Send` (e.g. a blocking POST to opencode) doesn't block update reception, the ⏹ button always works.
 - **`/restart`:** hard `syscall.Exec` with no confirmation. The notification Send and exec run in goroutines so the command fires even if something is stuck.
 
