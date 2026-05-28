@@ -81,7 +81,7 @@ Routing is per-user: the bot mints a Bearer token per user and wires it into eac
 ### Install
 
 ```bash
-git clone https://github.com/<your-username>/agentgram.git
+git clone https://github.com/nkschmidt/agentgram.git
 cd agentgram
 ```
 
