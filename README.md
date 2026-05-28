@@ -1,4 +1,4 @@
-# tg — Telegram bot wrapper for CLI agents
+# agentgram — Telegram bot wrapper for CLI agents
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go)](https://go.dev/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
@@ -63,8 +63,8 @@ Bot: Done. Moved authentication into package auth, updated imports, all 12 tests
 ### Install
 
 ```bash
-git clone https://github.com/<your-username>/tg.git
-cd tg
+git clone https://github.com/<your-username>/agentgram.git
+cd agentgram
 ```
 
 ### Configure
@@ -160,24 +160,24 @@ go build -o bot ./cmd/bot
 ### VPS (systemd)
 
 ```bash
-sudo tee /etc/systemd/system/tg-bot.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/agentgram.service > /dev/null <<EOF
 [Unit]
-Description=Telegram AI Agent Bot
+Description=agentgram — Telegram AI Agent Bot
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/tg
-ExecStart=/opt/tg/bot
+WorkingDirectory=/opt/agentgram
+ExecStart=/opt/agentgram/bot
 Restart=on-failure
 RestartSec=5
-EnvironmentFile=/opt/tg/.env
+EnvironmentFile=/opt/agentgram/.env
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl enable --now tg-bot
+sudo systemctl enable --now agentgram
 ```
 
 ## Extending
