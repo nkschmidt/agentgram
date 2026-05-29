@@ -20,6 +20,7 @@ import (
 type tgReplier struct{ api *tgbotapi.BotAPI }
 
 func (r *tgReplier) Send(_ context.Context, chatID int64, text string, kb command.InlineKeyboard) (int, error) {
+	text = clean(text)
 	msg := tgbotapi.NewMessage(chatID, text)
 	if len(kb) > 0 {
 		msg.ReplyMarkup = toMarkup(kb)
@@ -32,6 +33,7 @@ func (r *tgReplier) Send(_ context.Context, chatID int64, text string, kb comman
 }
 
 func (r *tgReplier) Edit(_ context.Context, chatID int64, messageID int, text string, kb command.InlineKeyboard) error {
+	text = clean(text)
 	// NewEditMessageTextAndMarkup always updates both text and keyboard —
 	// an empty kb clears the keyboard (behavior NewEditMessageText doesn't give).
 	edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, text, toMarkup(kb))
@@ -45,6 +47,7 @@ func (r *tgReplier) Edit(_ context.Context, chatID int64, messageID int, text st
 }
 
 func (r *tgReplier) SendHTML(_ context.Context, chatID int64, text string, kb command.InlineKeyboard) (int, error) {
+	text = clean(text)
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
 	if len(kb) > 0 {
@@ -58,6 +61,7 @@ func (r *tgReplier) SendHTML(_ context.Context, chatID int64, text string, kb co
 }
 
 func (r *tgReplier) EditHTML(_ context.Context, chatID int64, messageID int, text string, kb command.InlineKeyboard) error {
+	text = clean(text)
 	edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, text, toMarkup(kb))
 	edit.ParseMode = tgbotapi.ModeHTML
 	if _, err := r.api.Send(edit); err != nil {
@@ -107,6 +111,15 @@ func toMarkup(kb command.InlineKeyboard) tgbotapi.InlineKeyboardMarkup {
 	// serializes as "null" and rejects with "must be of type Array".
 	// make guarantees non-nil even for an empty keyboard.
 	return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// clean strips invalid UTF-8 byte sequences. The Telegram API rejects any
+// request whose text isn't valid UTF-8 ("Bad Request: strings must be encoded
+// in UTF-8"); streamed chunks can end mid-rune (a multi-byte character cut in
+// half — common with Cyrillic), so we drop the dangling bytes here, at the
+// single boundary to Telegram. On already-valid text this is a no-op.
+func clean(s string) string {
+	return strings.ToValidUTF8(s, "")
 }
 
 // isNotModified — Telegram returns 400 on Edit with the same content.
