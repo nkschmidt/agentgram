@@ -36,23 +36,28 @@ Bot: Done. Moved authentication into package auth, updated imports, all 12 tests
 - **Documents and photos** — downloaded to the server, the path is passed to the agent.
 - **Voice messages** — transcribed via whisper.cpp right inside the bot.
 
-### Files from the agent (MCP)
+### Agent ↔ user channel (MCP)
 
-The bot runs a local [MCP](https://modelcontextprotocol.io/) server that gives agents two extra tools, so they can push files **back** to your chat — not just reply with text:
+The bot runs a local [MCP](https://modelcontextprotocol.io/) server that gives agents three extra tools, so they can reach **back** to your chat — not just reply with text:
 
 - **`send_photo`** — send an image inline as a photo (with optional caption).
 - **`send_document`** — send any file as a downloadable attachment.
+- **`ask_user`** — ask a question mid-task; options are shown as tappable buttons, and you can also just reply with text.
 
 ```
 You: Plot the sales data from report.csv and send me the chart
 Bot: 📊 Built the chart from 1,240 rows.
-     [photo: sales_q3.png]  ← delivered via send_photo
+     [photo: sales_q3.png]      ← delivered via send_photo
+
+You: Deploy the new version
+Bot: ❓ Which environment?
+     [ Staging ] [ Production ]  ← ask_user buttons (or type your own answer)
 ```
 
-Routing is per-user: the bot mints a Bearer token per user and wires it into each backend's MCP config, so a tool call always lands in the right chat. Works for both backends:
+Routing is per-user: the bot mints a Bearer token per user and wires it into each backend's MCP config, so a tool call always lands in the right chat. `ask_user` blocks until you answer (button tap or typed reply); `/new_session` and `/restart` always work as an escape hatch. Works for both backends:
 
-- **Claude Code** — token passed per invocation via `--mcp-config` + `--allowedTools`.
-- **OpenCode** — registered as a remote MCP server in a per-workdir `opencode.json` (the bot writes/merges it on session start).
+- **Claude Code** — token passed per invocation via `--mcp-config` + `--allowedTools`; the agent is nudged toward these tools via `--append-system-prompt`.
+- **OpenCode** — registered as a remote MCP server in a per-workdir `opencode.json` (the bot writes/merges it on session start); nudged via the per-message `system` instruction.
 
 ### Settings
 

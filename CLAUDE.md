@@ -26,7 +26,9 @@ Modular architecture: adding a new backend / command / settings section doesn't 
   - `claude` — per-message `claude -p --output-format stream-json --verbose [--resume <id>]`. Multi-turn via `--resume`. Interrupt = SIGINT through `cmd.Cancel`.
   - `opencode` — HTTP API to a local `opencode serve`. **LazyServer** — one process for all users, started on the first opencode selection. Each user gets their own session on the server. `directory` is passed as a query parameter on every request. SSE for stream, POST `/message` is blocking (no timeout). Interrupt = POST `/abort`.
 - **Response streaming:** one message in the chat, updated via Edit. Typing indicator (re-sent every 4s). An ⏹ Stop button hangs below the message (SIGINT for claude, POST `/abort` for opencode; launched in a goroutine — doesn't block the UI). The final is unified: `Chunk{Text, Final: true}` replaces the accumulated progress.
-- **Agent → user files (MCP):** the bot runs a local MCP server (`internal/mcp`, official go-sdk over Streamable HTTP) giving agents `send_photo` / `send_document` tools — an agent can push a generated image/file straight into the chat, separate from its text answer. A tool call carries no Telegram identity, so the bot mints a stable per-user Bearer token and the backends inject it into each agent's MCP client config; `getServer` resolves token→userID per request. Delivery goes through `mcp.Sender`, implemented in `internal/bot` (tgbotapi stays locked there). Wiring differs per backend:
+- **Agent ↔ user (MCP):** the bot runs a local MCP server (`internal/mcp`, official go-sdk over Streamable HTTP) giving agents three tools — `send_photo` / `send_document` (push a file straight into the chat, separate from the text answer) and `ask_user` (ask a question mid-task, rendered as inline buttons, also answerable by free text). A tool call carries no Telegram identity, so the bot mints a stable per-user Bearer token and the backends inject it into each agent's MCP client config; `getServer` resolves token→userID per request. All three go through `mcp.Bot`, implemented in `internal/bot` (tgbotapi stays locked there).
+  - **ask_user is blocking:** the tool handler calls `Bot.AskUser`, which posts the question and blocks until the user taps a button or types a reply (intercepted in `handleCallback`/`handleMessage` before normal dispatch; commands like `/new_session` are exempt as an escape hatch) or ctx is cancelled (interrupt) / 10-min timeout. This works in headless because the answer returns over the MCP connection, not stdin — claude's native `AskUserQuestion` can't (no way to feed the result back), so it's disabled (`--disallowedTools`) and the agent is steered to `ask_user` via `mcp.AgentGuidance` (claude: `--append-system-prompt`; opencode: per-message `system` field).
+  - Per-backend MCP wiring:
   - `claude` — per-message subprocess, so per-user `--mcp-config <inline JSON>` + `--allowedTools mcp__agentgram__*`. Fully multi-user-safe.
   - `opencode` — one shared `opencode serve`, so the only per-user hook is the project config: on `Start` the backend writes/merges `<workdir>/opencode.json` with the user's remote-MCP entry. Verified: opencode reads project MCP config per `directory` and connects per session, so this is multi-user-safe too.
   - **Duplicate suppression:** weak models (seen with opencode + qwen) sometimes emit the *same* `tools/call` twice in one turn (two distinct JSON-RPC ids, not a transport retry), so the file was delivered twice. `mcp.Server` collapses identical sends (same userID/tool/path/caption within `dedupWindow`) — delivers once, returns OK for the duplicate. claude doesn't double, so it's unaffected.
@@ -77,16 +79,20 @@ internal/bot/               — tgbotapi glue (the only package with tgbotapi):
     composer.go             — Text/Caption + Document/Photo/Voice/Audio → prompt.
                               Downloads into `<workdir>/.tmp/` or TempDir,
                               voice goes through Transcriber.
-    sender.go               — Service implements mcp.Sender (SendPhoto/
-                              SendDocument) + userID→chatID tracking. Lets the
-                              MCP server push files back to the user's chat.
+    sender.go               — Service implements mcp.Bot (SendPhoto/
+                              SendDocument/AskUser) + userID→chatID tracking +
+                              ask_user state (pendingAsk). handleMessage/
+                              handleCallback intercept the user's reply/tap to
+                              answer a pending question (commands exempt).
 internal/mcp/               — local MCP server (official go-sdk, Streamable
-                              HTTP) exposing send_photo / send_document to the
-                              agents. Per-user routing: TokenFor(userID) mints a
-                              Bearer token, getServer(*http.Request) resolves
-                              token→userID and returns a per-user server whose
-                              tools call Sender. ClaudeMCPConfig / OpencodeConfig
-                              build each backend's MCP client config.
+                              HTTP) exposing send_photo / send_document /
+                              ask_user to the agents. Per-user routing:
+                              TokenFor(userID) mints a Bearer token,
+                              getServer(*http.Request) resolves token→userID and
+                              returns a per-user server whose tools call Bot.
+                              ClaudeMCPConfig / OpencodeConfig build each
+                              backend's MCP client config; AgentGuidance is the
+                              system-prompt nudge to actually use the tools.
 internal/command/           — command layer:
     replier.go              — Replier interface (Send/Edit/SendHTML/EditHTML/
                               Delete/Answer/Typing).

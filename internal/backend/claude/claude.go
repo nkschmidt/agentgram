@@ -35,8 +35,9 @@ import (
 const Name = "claude"
 
 type Backend struct {
-	workDir func() string   // current working directory, read on every Send
-	mcpArgs func() []string // extra CLI args wiring the bot's MCP server (may be nil)
+	workDir   func() string   // current working directory, read on every Send
+	mcpArgs   func() []string // extra CLI args wiring the bot's MCP server (may be nil)
+	extraArgs []string        // static extra args (system prompt, tool policy)
 
 	mu        sync.Mutex
 	sessionID string             // issued by claude itself, used for --resume
@@ -55,10 +56,21 @@ type Backend struct {
 // whitelist via --allowedTools. It's read on every Send, so it works even if
 // the MCP server became ready after the factory was built. A claude process is
 // per-user, so each user's token stays isolated.
-func New(provider func(userID int64) string, mcpConfig func(userID int64) (configJSON string, allowedTools []string)) backend.Factory {
+//
+// systemPrompt, if non-empty, is appended to claude's system prompt (so it
+// knows to use the bot's MCP tools), and the built-in AskUserQuestion tool is
+// disabled — it can't be answered in headless mode, so the agent is steered to
+// the ask_user MCP tool instead.
+func New(provider func(userID int64) string, mcpConfig func(userID int64) (configJSON string, allowedTools []string), systemPrompt string) backend.Factory {
 	return func(userID int64) backend.Backend {
 		b := &Backend{
 			workDir: func() string { return provider(userID) },
+		}
+		if systemPrompt != "" {
+			b.extraArgs = []string{
+				"--append-system-prompt", systemPrompt,
+				"--disallowedTools", "AskUserQuestion",
+			}
 		}
 		if mcpConfig != nil {
 			b.mcpArgs = func() []string {
@@ -108,6 +120,7 @@ func (b *Backend) Send(input string) error {
 	if b.mcpArgs != nil {
 		args = append(args, b.mcpArgs()...)
 	}
+	args = append(args, b.extraArgs...)
 
 	ctx, cancel := context.WithCancel(b.rootCtx)
 	cmd := exec.CommandContext(ctx, "claude", args...)

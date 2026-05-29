@@ -102,6 +102,9 @@ func (b *Backend) emitAssistant(m *eventMessage) {
 				b.emit(backend.Chunk{Text: c.Text})
 			}
 		case "tool_use":
+			if toolfmt.Internal(c.Name) {
+				continue // bot's own MCP tools have their own chat UI; don't show the step
+			}
 			b.emit(backend.Chunk{Text: toolfmt.ToolUse(c.Name, c.Input)})
 		case "thinking":
 			if c.Thinking != "" {

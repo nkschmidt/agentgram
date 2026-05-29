@@ -35,6 +35,14 @@ func (s *stubSender) SendDocument(_ context.Context, userID int64, path, caption
 	return nil
 }
 
+func (s *stubSender) AskUser(_ context.Context, _ int64, question string, options []string) (string, error) {
+	// Echo deterministically: first option if any, else the question.
+	if len(options) > 0 {
+		return options[0], nil
+	}
+	return "answer:" + question, nil
+}
+
 type authRT struct {
 	base  http.RoundTripper
 	token string
@@ -81,8 +89,8 @@ func TestSendPhotoRoutesToUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 2 {
-		t.Fatalf("want 2 tools, got %d", len(tools.Tools))
+	if len(tools.Tools) != 3 {
+		t.Fatalf("want 3 tools, got %d", len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &sdk.CallToolParams{
@@ -133,6 +141,58 @@ func TestDuplicateSendSuppressed(t *testing.T) {
 	defer sender.mu.Unlock()
 	if sender.docN != 2 {
 		t.Fatalf("want 2 deliveries (1 deduped + 1 distinct), got %d", sender.docN)
+	}
+}
+
+func TestAskUserReturnsAnswer(t *testing.T) {
+	srv := NewServer(&stubSender{})
+	if err := srv.Listen("127.0.0.1:0"); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	cs := connect(t, srv.URL(), srv.TokenFor(7))
+	defer cs.Close()
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "ask_user",
+		Arguments: map[string]any{"question": "Pick one", "options": []string{"A", "B"}},
+	})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool error: %+v", res.Content)
+	}
+	// stub returns the first option; surfaced as text content.
+	txt, ok := res.Content[0].(*sdk.TextContent)
+	if !ok || txt.Text != "A" {
+		t.Fatalf("want answer 'A', got %+v", res.Content)
+	}
+}
+
+// TestClaudeConfigWhitelistsEveryTool guards against the headless failure where
+// a tool is registered but missing from --allowedTools (then claude reports it
+// as "unavailable / no permission" and falls back to plain text).
+func TestClaudeConfigWhitelistsEveryTool(t *testing.T) {
+	srv := NewServer(&stubSender{})
+	if err := srv.Listen("127.0.0.1:0"); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	_, allowed := srv.ClaudeMCPConfig(7)
+	if len(allowed) != len(allTools) {
+		t.Fatalf("allowed tools = %v, want %d entries", allowed, len(allTools))
+	}
+	for _, name := range allTools {
+		want := "mcp__" + ServerName + "__" + name
+		found := false
+		for _, a := range allowed {
+			if a == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("tool %q not whitelisted in ClaudeMCPConfig", want)
+		}
 	}
 }
 

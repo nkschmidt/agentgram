@@ -36,17 +36,48 @@ import (
 // mcp__<ServerName>__<tool>, so it also appears in claude's --allowedTools.
 const ServerName = "agentgram"
 
-// Sender performs the actual Telegram delivery for a resolved user.
-// Implemented in internal/bot so tgbotapi stays locked there; satisfied
-// structurally, mcp doesn't import bot.
-type Sender interface {
+// Tool names — single source of truth, used both when registering the tools
+// (build) and when whitelisting them for claude (ClaudeMCPConfig), so the two
+// can't drift (a missing entry makes the tool unavailable in headless mode).
+const (
+	toolSendPhoto    = "send_photo"
+	toolSendDocument = "send_document"
+	toolAskUser      = "ask_user"
+)
+
+// allTools lists every tool the server exposes.
+var allTools = []string{toolSendPhoto, toolSendDocument, toolAskUser}
+
+// Bot is the bridge to the Telegram side for a resolved user. Implemented in
+// internal/bot so tgbotapi stays locked there; satisfied structurally, mcp
+// doesn't import bot.
+type Bot interface {
 	SendPhoto(ctx context.Context, userID int64, path, caption string) error
 	SendDocument(ctx context.Context, userID int64, path, caption string) error
+	// AskUser sends a question to the user and blocks until they answer — by
+	// tapping one of options (if any) or typing free-form text — returning the
+	// chosen/typed answer. ctx cancellation (interrupt) or a timeout aborts it.
+	AskUser(ctx context.Context, userID int64, question string, options []string) (answer string, err error)
 }
+
+// AgentGuidance is injected into the agent's system prompt so it actually uses
+// these tools (rather than its own broken-in-headless question UI or plain
+// text). Backends wire it in their own way (claude: --append-system-prompt).
+const AgentGuidance = "You are operating through a Telegram chat. The user only sees your final text answer at the very " +
+	"end of your turn and CANNOT reply in the middle of it. Therefore, whenever you need anything from the user " +
+	"mid-turn — a choice between options, a clarification, OR a confirmation before a destructive/irreversible action " +
+	"(deleting, overwriting, force-pushing, etc.) — you MUST call the `ask_user` tool. Pass the choices as `options` " +
+	"(e.g. [\"Yes, delete\", \"Cancel\"] for a confirmation, or the concrete alternatives for a choice); the user taps a " +
+	"button or types a free-form reply, and you get their answer back. NEVER ask a question, present numbered options, " +
+	"or request confirmation as plain text — the user has no way to act on that mid-turn. This also covers the case " +
+	"where you could NOT complete the request (blocked by permissions, ambiguous target, needs a decision) and want to " +
+	"offer the user ways to proceed: present those as `ask_user` options, never as a numbered list ending with a " +
+	"question like \"How shall we proceed?\". Also use `send_photo` to deliver an image inline and `send_document` to " +
+	"deliver a file to the chat."
 
 // Server is the local MCP endpoint shared by all users.
 type Server struct {
-	sender  Sender
+	bot     Bot
 	baseURL string // http://host:port, filled by Listen
 
 	mu      sync.Mutex
@@ -75,9 +106,9 @@ type dedupKey struct {
 const dedupWindow = 30 * time.Second
 
 // NewServer creates the MCP server. Call Listen to start serving.
-func NewServer(sender Sender) *Server {
+func NewServer(bot Bot) *Server {
 	return &Server{
-		sender:  sender,
+		bot:     bot,
 		tokens:  make(map[int64]string),
 		byToken: make(map[string]int64),
 		cache:   make(map[int64]*sdk.Server),
@@ -205,12 +236,22 @@ type sendResult struct {
 	OK bool `json:"ok"`
 }
 
+// askArgs / askResult are the I/O for the ask_user tool.
+type askArgs struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options,omitempty"`
+}
+
+type askResult struct {
+	Answer string `json:"answer"`
+}
+
 // build constructs an MCP server whose tools deliver to the given userID.
 func (s *Server) build(userID int64) *sdk.Server {
 	srv := sdk.NewServer(&sdk.Implementation{Name: ServerName, Version: "1"}, nil)
 
 	sdk.AddTool(srv, &sdk.Tool{
-		Name: "send_photo",
+		Name: toolSendPhoto,
 		Description: "Send an image file to the user in this Telegram chat, shown inline as a photo. " +
 			"Use for images you want the user to view directly (png, jpg, webp, gif). " +
 			"'path' is an absolute path or a path relative to the working directory. " +
@@ -221,7 +262,7 @@ func (s *Server) build(userID int64) *sdk.Server {
 		if !s.reserve(k) {
 			return okResult("already sent (duplicate call ignored)"), sendResult{OK: true}, nil
 		}
-		if err := s.sender.SendPhoto(ctx, userID, in.Path, in.Caption); err != nil {
+		if err := s.bot.SendPhoto(ctx, userID, in.Path, in.Caption); err != nil {
 			s.release(k)
 			return errorResult(err), sendResult{}, nil
 		}
@@ -229,7 +270,7 @@ func (s *Server) build(userID int64) *sdk.Server {
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
-		Name: "send_document",
+		Name: toolSendDocument,
 		Description: "Send any file to the user in this Telegram chat as a document (downloadable attachment). " +
 			"Use for non-image files or images you want delivered as files rather than inline photos. " +
 			"'path' is an absolute path or a path relative to the working directory. " +
@@ -239,11 +280,27 @@ func (s *Server) build(userID int64) *sdk.Server {
 		if !s.reserve(k) {
 			return okResult("already sent (duplicate call ignored)"), sendResult{OK: true}, nil
 		}
-		if err := s.sender.SendDocument(ctx, userID, in.Path, in.Caption); err != nil {
+		if err := s.bot.SendDocument(ctx, userID, in.Path, in.Caption); err != nil {
 			s.release(k)
 			return errorResult(err), sendResult{}, nil
 		}
 		return okResult("document sent"), sendResult{OK: true}, nil
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: toolAskUser,
+		Description: "Ask the user a question and wait for their reply. " +
+			"If you pass 'options', each is shown as a tappable button in the chat; the user may still answer with " +
+			"free-form text instead. With no 'options' it's an open question answered by text. " +
+			"Use this whenever you need the user to choose or clarify mid-task, instead of asking in your normal reply — " +
+			"your normal reply is only delivered at the end of the turn. " +
+			"Returns the user's answer (the chosen option's label, or whatever text they typed).",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, in askArgs) (*sdk.CallToolResult, askResult, error) {
+		ans, err := s.bot.AskUser(ctx, userID, in.Question, in.Options)
+		if err != nil {
+			return errorResult(err), askResult{}, nil
+		}
+		return okResult(ans), askResult{Answer: ans}, nil
 	})
 
 	return srv
@@ -295,10 +352,11 @@ func (s *Server) ClaudeMCPConfig(userID int64) (configJSON string, allowedTools 
 		},
 	}
 	b, _ := json.Marshal(cfg)
-	return string(b), []string{
-		"mcp__" + ServerName + "__send_photo",
-		"mcp__" + ServerName + "__send_document",
+	tools := make([]string, len(allTools))
+	for i, name := range allTools {
+		tools[i] = "mcp__" + ServerName + "__" + name
 	}
+	return string(b), tools
 }
 
 // OpencodeConfig returns the bytes of a project-level opencode.json that

@@ -39,6 +39,11 @@ type Service struct {
 	// knows the userID. For a private chat the chat id equals the user id —
 	// that's also the fallback before anything is recorded.
 	chatIDs sync.Map // userID -> chatID
+
+	// asks holds in-flight ask_user questions per user. While one is pending,
+	// the user's next button tap or text message is consumed as the answer
+	// instead of being dispatched/forwarded to the agent.
+	asks sync.Map // userID -> *pendingAsk
 }
 
 // New creates the service and immediately authorizes with Telegram — so we
@@ -123,6 +128,12 @@ func (s *Service) handleMessage(ctx context.Context, m *tgbotapi.Message, d Disp
 		return
 	}
 	s.chatIDs.Store(m.From.ID, m.Chat.ID)
+	// If the agent is waiting on an ask_user question, this message is the
+	// answer — deliver it and stop, don't forward it as a new prompt. Commands
+	// are exempt so the user can always escape (/new_session, /restart).
+	if !isCommand(m.Text) && s.tryAnswerText(m.From.ID, m.Text) {
+		return
+	}
 	// composer assembles the text from Text/Caption + downloads Document/Photo/
 	// Voice/Audio and adds the corresponding tags (with local path for
 	// documents/images and a transcription for audio). If there's
@@ -151,6 +162,12 @@ func (s *Service) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery,
 		return
 	}
 	s.chatIDs.Store(q.From.ID, q.Message.Chat.ID)
+	// Answer-button taps for a pending ask_user question are handled here, not
+	// dispatched to the regular callback router.
+	if s.tryAnswerCallback(q.From.ID, q.Data) {
+		_, _ = s.api.Request(tgbotapi.NewCallback(q.ID, "✓"))
+		return
+	}
 	err := d.DispatchCallback(ctx, router.Callback{
 		ID:        q.ID,
 		Data:      q.Data,

@@ -83,11 +83,11 @@ func main() {
 	// Working directory — from settings, read on every process request.
 	// Each backend also gets the bot's MCP server wired in per user.
 	backendReg := backend.NewRegistry()
-	backendReg.Register(claude.Name, claude.New(store.WorkDirOf, mcpSrv.ClaudeMCPConfig))
+	backendReg.Register(claude.Name, claude.New(store.WorkDirOf, mcpSrv.ClaudeMCPConfig, mcp.AgentGuidance))
 
 	opencodeLazy := opencode.NewLazyServer(4096, "127.0.0.1")
 	defer opencodeLazy.Shutdown()
-	backendReg.Register(opencode.Name, opencode.New(opencodeLazy, store.WorkDirOf, mcpSrv.OpencodeConfig))
+	backendReg.Register(opencode.Name, opencode.New(opencodeLazy, store.WorkDirOf, mcpSrv.OpencodeConfig, mcp.AgentGuidance))
 
 	// Forward-declare sessionMgr — it's needed by the closure inside StreamCoordinator
 	// (so the "⏹ Stop" button can send SIGINT to the process), but Manager itself

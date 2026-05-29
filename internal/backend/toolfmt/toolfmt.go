@@ -32,6 +32,16 @@ var toolEmoji = map[string]string{
 	"ls":           "📋",
 }
 
+// Internal reports whether a tool name belongs to the bot's own MCP server
+// (agentgram — claude names it mcp__agentgram__x, opencode agentgram_x). These
+// tools already have a visible effect in the chat (a sent file, or an ask_user
+// question message), so their raw tool-call steps are pure noise in the
+// progress view — especially when a weak model fires several at once — and the
+// backends skip rendering them.
+func Internal(name string) bool {
+	return strings.Contains(strings.ToLower(name), "agentgram")
+}
+
 // ToolUse renders a tool call into a string for chat.
 // For example: "📖 Read · /path/to/file" or "💻 Bash · ls -la".
 // If name is empty — "tool" is used. If there's no known emoji for name —

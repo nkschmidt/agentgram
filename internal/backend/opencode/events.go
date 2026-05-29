@@ -108,6 +108,9 @@ func (b *Backend) renderPart(p *partPayload) string {
 		}
 		return p.Text
 	case "tool":
+		if toolfmt.Internal(p.Tool) {
+			return "" // bot's own MCP tools have their own chat UI; don't show the step
+		}
 		if p.State == nil {
 			return ""
 		}

@@ -19,6 +19,7 @@ type Backend struct {
 	lazy      *LazyServer
 	workDir   func() string
 	mcpConfig func() []byte // bot's MCP server as an opencode.json doc (may be nil)
+	system    string        // per-message system instruction (MCP tool guidance)
 	client    *Client
 
 	mu        sync.Mutex
@@ -54,11 +55,15 @@ type opPart struct {
 // shared by all users, the only per-user hook is the project config in each
 // user's working directory — we write it on Start so opencode picks it up when
 // it resolves the session's directory.
-func New(lazy *LazyServer, provider func(userID int64) string, mcpConfig func(userID int64) []byte) backend.Factory {
+//
+// systemPrompt, if non-empty, is sent as the per-message `system` instruction
+// so the agent knows to use the bot's MCP tools (ask_user / send_*).
+func New(lazy *LazyServer, provider func(userID int64) string, mcpConfig func(userID int64) []byte, systemPrompt string) backend.Factory {
 	return func(userID int64) backend.Backend {
 		b := &Backend{
 			lazy:    lazy,
 			workDir: func() string { return provider(userID) },
+			system:  systemPrompt,
 			parts:   map[string]opPart{},
 		}
 		if mcpConfig != nil {
@@ -135,7 +140,7 @@ func (b *Backend) Send(input string) error {
 	b.stateMu.Lock()
 	b.lastSent = input
 	b.stateMu.Unlock()
-	return b.client.SendMessage(context.Background(), sessionID, input)
+	return b.client.SendMessage(context.Background(), sessionID, input, b.system)
 }
 
 func (b *Backend) Recv() <-chan backend.Chunk { return b.out }

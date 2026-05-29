@@ -49,12 +49,17 @@ func (c *Client) CreateSession(ctx context.Context) (string, error) {
 // Uses the stream client without timeout: opencode returns a response only
 // after the model has finished generating (this can take minutes,
 // especially with tool calls).
-func (c *Client) SendMessage(ctx context.Context, sessionID, text string) error {
+func (c *Client) SendMessage(ctx context.Context, sessionID, text, system string) error {
 	payload := map[string]any{
 		"sessionID": sessionID,
 		"parts": []map[string]any{
 			{"type": "text", "text": text},
 		},
+	}
+	if system != "" {
+		// Per-message system instruction — tells the agent to use the bot's MCP
+		// tools. opencode merges it with its own system prompt.
+		payload["system"] = system
 	}
 	return c.doWith(ctx, c.stream, http.MethodPost, "/session/"+sessionID+"/message", payload, nil)
 }
