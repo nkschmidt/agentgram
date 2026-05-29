@@ -59,16 +59,22 @@ func (c *SessionsCommand) HandleCallback(ctx context.Context, cb router.Callback
 
 // start launches a backend session via SessionService. The previous session
 // (if any) is stopped inside the manager — no need to know about it here.
+//
+// The callback is answered up front: starting a backend can be slow (a cold
+// opencode server spinning up), and Telegram invalidates the callback query
+// after ~15s ("query is too old"). We then show progress and report the result
+// by editing the message, so a slow start never leaves the UI stuck.
 func (c *SessionsCommand) start(ctx context.Context, cb router.Callback, r Replier, backendName, label string) error {
+	_ = r.Answer(ctx, cb.ID, "Starting "+label+"…")
+	_ = r.Edit(ctx, cb.ChatID, cb.MessageID, "⏳ Starting "+label+"…", nil)
+
 	if err := c.sessions.Start(ctx, cb.UserID, cb.ChatID, backendName); err != nil {
-		// leave the buttons in place so the user can pick another backend
-		return r.Answer(ctx, cb.ID, "Error: "+err.Error())
+		// Restore the menu so the user can retry or pick another backend.
+		return r.Edit(ctx, cb.ChatID, cb.MessageID,
+			"⚠ Failed to start "+label+": "+err.Error(), c.menuKeyboard())
 	}
 	text := fmt.Sprintf("✨ Session %s started.\n\nWrite messages — they'll be forwarded to the process.", label)
-	if err := r.Edit(ctx, cb.ChatID, cb.MessageID, text, nil); err != nil {
-		return err
-	}
-	return r.Answer(ctx, cb.ID, "Started")
+	return r.Edit(ctx, cb.ChatID, cb.MessageID, text, nil)
 }
 
 // menuText shows the header plus — if any — the active session.
