@@ -26,6 +26,10 @@ type Replier interface {
 	EditHTML(ctx context.Context, chatID int64, messageID int, text string, kb InlineKeyboard) error
 	// Delete deletes a message from the chat.
 	Delete(ctx context.Context, chatID int64, messageID int) error
+	// EditMarkup updates only a message's inline keyboard (an empty kb removes
+	// it), leaving the text intact. Used to move the ⏹ Stop button to the
+	// message that's currently streaming.
+	EditMarkup(ctx context.Context, chatID int64, messageID int, kb InlineKeyboard) error
 	// Answer — ack the callback query. Telegram spins the button until
 	// it receives this call. Toast — optional popup message.
 	Answer(ctx context.Context, callbackID string, toast string) error

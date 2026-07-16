@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/schmidt/agentgram/internal/diffimg"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -43,10 +44,11 @@ const (
 	toolSendPhoto    = "send_photo"
 	toolSendDocument = "send_document"
 	toolAskUser      = "ask_user"
+	toolRenderDiff   = "render_diff"
 )
 
 // allTools lists every tool the server exposes.
-var allTools = []string{toolSendPhoto, toolSendDocument, toolAskUser}
+var allTools = []string{toolSendPhoto, toolSendDocument, toolAskUser, toolRenderDiff}
 
 // Bot is the bridge to the Telegram side for a resolved user. Implemented in
 // internal/bot so tgbotapi stays locked there; satisfied structurally, mcp
@@ -63,22 +65,22 @@ type Bot interface {
 // AgentGuidance is injected into the agent's system prompt so it actually uses
 // these tools (rather than its own broken-in-headless question UI or plain
 // text). Backends wire it in their own way (claude: --append-system-prompt).
-const AgentGuidance = "You are operating through a Telegram chat. The user only sees your final text answer at the very " +
-	"end of your turn and CANNOT reply in the middle of it. Therefore, whenever you need anything from the user " +
-	"mid-turn — a choice between options, a clarification, OR a confirmation before a destructive/irreversible action " +
-	"(deleting, overwriting, force-pushing, etc.) — you MUST call the `ask_user` tool. Pass the choices as `options` " +
-	"(e.g. [\"Yes, delete\", \"Cancel\"] for a confirmation, or the concrete alternatives for a choice); the user taps a " +
-	"button or types a free-form reply, and you get their answer back. NEVER ask a question, present numbered options, " +
-	"or request confirmation as plain text — the user has no way to act on that mid-turn. This also covers the case " +
-	"where you could NOT complete the request (blocked by permissions, ambiguous target, needs a decision) and want to " +
-	"offer the user ways to proceed: present those as `ask_user` options, never as a numbered list ending with a " +
-	"question like \"How shall we proceed?\". Also use `send_photo` to deliver an image inline and `send_document` to " +
-	"deliver a file to the chat."
+const AgentGuidance = "CRITICAL RULE — you are in a Telegram chat and CANNOT talk to the user mid-turn: they only see " +
+	"your message at the very end, and cannot reply in between. Therefore, to ask ANY question, get ANY choice, or " +
+	"confirm ANYTHING, you MUST call the `ask_user` tool and wait for its result. ALWAYS pass 2–5 short `options` so " +
+	"the user can tap an answer (they may also type). This includes: clarifying questions, picking between approaches, " +
+	"yes/no confirmation before destructive actions, and offering ways to proceed when you are blocked. " +
+	"It is FORBIDDEN to write a question, a numbered list of choices, or phrases like \"which do you prefer?\", " +
+	"\"let me know\", \"could you tell me\" as plain text — the user literally cannot answer that. If you catch " +
+	"yourself about to ask in text, stop and call `ask_user` instead. " +
+	"Also: `send_photo` to show an image inline, `send_document` to send a file, and `render_diff` to send the user " +
+	"a picture of the repository's uncommitted changes (git diff)."
 
 // Server is the local MCP endpoint shared by all users.
 type Server struct {
-	bot     Bot
-	baseURL string // http://host:port, filled by Listen
+	bot       Bot
+	workDirOf func(userID int64) string // resolves a user's working directory; may be nil
+	baseURL   string                    // http://host:port, filled by Listen
 
 	mu      sync.Mutex
 	tokens  map[int64]string      // userID -> token (stable for the process lifetime)
@@ -105,14 +107,17 @@ type dedupKey struct {
 // through.
 const dedupWindow = 30 * time.Second
 
-// NewServer creates the MCP server. Call Listen to start serving.
-func NewServer(bot Bot) *Server {
+// NewServer creates the MCP server. Call Listen to start serving. workDirOf
+// resolves a user's working directory (used by render_diff to locate the repo);
+// pass nil if unavailable — render_diff then requires an explicit 'dir'.
+func NewServer(bot Bot, workDirOf func(userID int64) string) *Server {
 	return &Server{
-		bot:     bot,
-		tokens:  make(map[int64]string),
-		byToken: make(map[string]int64),
-		cache:   make(map[int64]*sdk.Server),
-		recent:  make(map[dedupKey]time.Time),
+		bot:       bot,
+		workDirOf: workDirOf,
+		tokens:    make(map[int64]string),
+		byToken:   make(map[string]int64),
+		cache:     make(map[int64]*sdk.Server),
+		recent:    make(map[dedupKey]time.Time),
 	}
 }
 
@@ -246,6 +251,11 @@ type askResult struct {
 	Answer string `json:"answer"`
 }
 
+// renderDiffArgs is the input for the render_diff tool.
+type renderDiffArgs struct {
+	Dir string `json:"dir,omitempty"`
+}
+
 // build constructs an MCP server whose tools deliver to the given userID.
 func (s *Server) build(userID int64) *sdk.Server {
 	srv := sdk.NewServer(&sdk.Implementation{Name: ServerName, Version: "1"}, nil)
@@ -301,6 +311,43 @@ func (s *Server) build(userID int64) *sdk.Server {
 			return errorResult(err), askResult{}, nil
 		}
 		return okResult(ans), askResult{Answer: ans}, nil
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: toolRenderDiff,
+		Description: "Render the repository's uncommitted changes (git diff HEAD plus untracked files) as image(s) " +
+			"and send them to the user in this Telegram chat as documents (crisp, not recompressed). " +
+			"Use when the user asks to see the diff as a picture. " +
+			"'dir' is the repo directory to diff; omit it to use the user's current working directory. " +
+			"Requires git and silicon on the host. Read-only — never modifies git state.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, in renderDiffArgs) (*sdk.CallToolResult, sendResult, error) {
+		dir := strings.TrimSpace(in.Dir)
+		if dir == "" && s.workDirOf != nil {
+			dir = s.workDirOf(userID)
+		}
+		if dir == "" {
+			return errorResult(fmt.Errorf("no working directory set; pass 'dir'")), sendResult{}, nil
+		}
+		k := dedupKey{userID, toolRenderDiff, dir, ""}
+		if !s.reserve(k) {
+			return okResult("already rendered (duplicate call ignored)"), sendResult{OK: true}, nil
+		}
+		imgs, cleanup, err := diffimg.Render(ctx, dir)
+		defer cleanup()
+		if err != nil {
+			s.release(k)
+			return errorResult(err), sendResult{}, nil
+		}
+		if len(imgs) == 0 {
+			return okResult("no uncommitted changes"), sendResult{OK: true}, nil
+		}
+		for _, img := range imgs {
+			if err := s.bot.SendDocument(ctx, userID, img.Path, img.Caption); err != nil {
+				s.release(k)
+				return errorResult(err), sendResult{}, nil
+			}
+		}
+		return okResult(fmt.Sprintf("sent %d diff image(s) as documents", len(imgs))), sendResult{OK: true}, nil
 	})
 
 	return srv
@@ -368,6 +415,13 @@ func (s *Server) OpencodeConfig(userID int64) []byte {
 	}
 	cfg := map[string]any{
 		"$schema": "https://opencode.ai/config.json",
+		// ask_user blocks until the user answers; opencode otherwise cancels an
+		// MCP tool after ~60s. Push the timeout to opencode's hard ceiling
+		// (~120s, capped by the AI SDK's streamText step limit) to give the user
+		// more time to answer. Beyond that opencode cancels regardless.
+		"experimental": map[string]any{
+			"mcp_timeout": 120000,
+		},
 		"mcp": map[string]any{
 			ServerName: map[string]any{
 				"type":    "remote",

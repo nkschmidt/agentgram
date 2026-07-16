@@ -26,6 +26,7 @@ type Backend struct {
 	sessionID string
 	out       chan backend.Chunk
 	cancel    context.CancelFunc
+	sessCtx   context.Context // cancelled on Stop; aborts the blocking POST /message
 	stopped   bool
 
 	// Current "assembly" of the model's response to the current user request.
@@ -33,17 +34,19 @@ type Backend struct {
 	// lastSent stores the prompt of the last Send — opencode echoes it back
 	// via message.part.updated (for user-message); we filter such parts out,
 	// otherwise they end up in the model's final answer.
-	stateMu  sync.Mutex
-	parts    map[string]opPart // id → part (text / tool)
-	order    []string          // order of part appearance
-	lastSent string            // text of the last Send (for echo filter)
+	stateMu    sync.Mutex
+	parts      map[string]opPart // id → part (text / tool / question)
+	order      []string          // order of part appearance
+	lastSent   string            // text of the last Send (for echo filter)
+	sealedUpTo int               // parts before this index belong to an already-sealed segment
+	asked      map[string]bool   // part ids for which a KindQuestion was already emitted
 }
 
 // opPart — unit of the accumulated snapshot. kind distinguishes the model's
-// text from tool calls: on final we keep only the text (unified with claude,
-// where Final also carries only the model's final answer without steps).
+// prose ("text") from tool steps ("tool") and ask_user calls ("question");
+// prose and steps are rendered per-segment (parts since the last seal).
 type opPart struct {
-	kind    string // "text" | "tool"
+	kind    string // "text" | "tool" | "question"
 	content string // text ready for display
 }
 
@@ -65,6 +68,7 @@ func New(lazy *LazyServer, provider func(userID int64) string, mcpConfig func(us
 			workDir: func() string { return provider(userID) },
 			system:  systemPrompt,
 			parts:   map[string]opPart{},
+			asked:   map[string]bool{},
 		}
 		if mcpConfig != nil {
 			b.mcpConfig = func() []byte { return mcpConfig(userID) }
@@ -88,6 +92,7 @@ func (b *Backend) Start(ctx context.Context) error {
 	b.out = make(chan backend.Chunk, 64)
 	subCtx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel
+	b.sessCtx = subCtx
 	b.mu.Unlock()
 
 	// Write the per-user MCP config into the working directory before creating
@@ -129,6 +134,7 @@ func (b *Backend) Send(input string) error {
 		return errors.New("opencode: stopped")
 	}
 	sessionID := b.sessionID
+	sessCtx := b.sessCtx
 	b.mu.Unlock()
 	if sessionID == "" {
 		return errors.New("opencode: no session")
@@ -140,7 +146,12 @@ func (b *Backend) Send(input string) error {
 	b.stateMu.Lock()
 	b.lastSent = input
 	b.stateMu.Unlock()
-	return b.client.SendMessage(context.Background(), sessionID, input, b.system)
+	// POST /message blocks for the whole turn; sessCtx (cancelled on Stop) lets a
+	// session switch abort the in-flight request instead of hanging or erroring late.
+	if sessCtx == nil {
+		sessCtx = context.Background()
+	}
+	return b.client.SendMessage(sessCtx, sessionID, input, b.system)
 }
 
 func (b *Backend) Recv() <-chan backend.Chunk { return b.out }

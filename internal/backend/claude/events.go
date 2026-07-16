@@ -81,9 +81,9 @@ func (b *Backend) handleEvent(ev event) {
 	case "assistant":
 		b.emitAssistant(ev.Message)
 	case "result":
-		if ev.Result != "" {
-			b.emit(backend.Chunk{Text: ev.Result, Final: true})
-		}
+		// The prose already streamed via assistant text blocks; End just seals
+		// it. (ev.Result duplicates the last assistant text.)
+		b.emit(backend.Chunk{Kind: backend.KindEnd})
 	case "system":
 		// init — internal (model, config), not needed in chat
 	case "user":
@@ -99,16 +99,18 @@ func (b *Backend) emitAssistant(m *eventMessage) {
 		switch c.Type {
 		case "text":
 			if c.Text != "" {
-				b.emit(backend.Chunk{Text: c.Text})
+				b.emit(backend.Chunk{Kind: backend.KindProse, Text: c.Text})
 			}
 		case "tool_use":
+			// Bot's own MCP tools have their own chat UI (sent file; ask_user
+			// question shown at tool-execution time) — no activity step.
 			if toolfmt.Internal(c.Name) {
-				continue // bot's own MCP tools have their own chat UI; don't show the step
+				continue
 			}
-			b.emit(backend.Chunk{Text: toolfmt.ToolUse(c.Name, c.Input)})
+			b.emit(backend.Chunk{Kind: backend.KindActivity, Text: toolfmt.ToolUse(c.Name, c.Input)})
 		case "thinking":
 			if c.Thinking != "" {
-				b.emit(backend.Chunk{Text: "💭 " + c.Thinking})
+				b.emit(backend.Chunk{Kind: backend.KindActivity, Text: "💭 " + c.Thinking})
 			}
 		}
 	}

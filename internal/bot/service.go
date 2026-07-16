@@ -40,11 +40,21 @@ type Service struct {
 	// that's also the fallback before anything is recorded.
 	chatIDs sync.Map // userID -> chatID
 
-	// asks holds in-flight ask_user questions per user. While one is pending,
-	// the user's next button tap or text message is consumed as the answer
-	// instead of being dispatched/forwarded to the agent.
-	asks sync.Map // userID -> *pendingAsk
+	// prompter owns ask_user: it displays questions and collects answers. The
+	// service routes the user's reply (text / button tap) into it and blocks
+	// AskUser on it. Optional; if unset, ask_user is unavailable.
+	prompter prompter
 }
+
+// prompter is the ask_user side of StreamCoordinator (wired in main).
+type prompter interface {
+	WaitAnswer(ctx context.Context, userID, chatID int64, question string, options []string) (string, error)
+	TryAnswerText(userID int64, text string) bool
+	TryAnswerCallback(userID int64, data string) bool
+}
+
+// SetPrompter wires the ask_user broker. Optional.
+func (s *Service) SetPrompter(p prompter) { s.prompter = p }
 
 // New creates the service and immediately authorizes with Telegram — so we
 // fail early and loudly if the token is invalid. transcriber may be Noop —
@@ -131,7 +141,7 @@ func (s *Service) handleMessage(ctx context.Context, m *tgbotapi.Message, d Disp
 	// If the agent is waiting on an ask_user question, this message is the
 	// answer — deliver it and stop, don't forward it as a new prompt. Commands
 	// are exempt so the user can always escape (/new_session, /restart).
-	if !isCommand(m.Text) && s.tryAnswerText(m.From.ID, m.Text) {
+	if s.prompter != nil && !isCommand(m.Text) && s.prompter.TryAnswerText(m.From.ID, m.Text) {
 		return
 	}
 	// composer assembles the text from Text/Caption + downloads Document/Photo/
@@ -162,9 +172,9 @@ func (s *Service) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery,
 		return
 	}
 	s.chatIDs.Store(q.From.ID, q.Message.Chat.ID)
-	// Answer-button taps for a pending ask_user question are handled here, not
-	// dispatched to the regular callback router.
-	if s.tryAnswerCallback(q.From.ID, q.Data) {
+	// Answer-button taps for a pending ask_user question are handled by the
+	// prompter, not dispatched to the regular callback router.
+	if s.prompter != nil && s.prompter.TryAnswerCallback(q.From.ID, q.Data) {
 		_, _ = s.api.Request(tgbotapi.NewCallback(q.ID, "✓"))
 		return
 	}

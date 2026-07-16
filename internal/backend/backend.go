@@ -29,24 +29,41 @@ type Backend interface {
 	Stop() error
 }
 
-// Chunk — a piece of the backend process's output.
+// ChunkKind classifies a Chunk so the UI can render each role distinctly. The
+// backend emits a single ordered stream of these per turn; the coordinator is
+// the only renderer.
+type ChunkKind uint8
+
+const (
+	// KindProse — the agent's words (answer text). Shown live and kept as a
+	// persistent message; sealed into a new message at each KindQuestion /
+	// KindEnd boundary, split across messages if longer than Telegram allows.
+	KindProse ChunkKind = iota
+	// KindActivity — a tool step / thinking ("what the agent is doing"). Shown
+	// in an ephemeral progress message, removed at the next boundary.
+	KindActivity
+	// KindEnd — the turn finished. Seals prose and removes the activity message.
+	KindEnd
+)
+
+// Note: ask_user is intentionally NOT a chunk kind. The question is displayed
+// by the coordinator when the MCP tool actually executes (WaitAnswer) — that
+// happens after the agent has produced the preceding prose, which keeps the
+// question below it in the chat. Emitting it from the event stream rendered it
+// too early (opencode surfaces the tool part before the text finishes).
+
+// Chunk — one ordered piece of the backend process's output for the current
+// turn.
 //
-//   - Text — textual content.
-//   - Replace=true — Text REPLACES the accumulated buffer (instead of appending).
-//     The stream continues — used for backends that send an incremental update
-//     of the full state (opencode message.part.updated).
-//   - Final=true — final chunk: Text replaces the accumulated value (if non-empty),
-//     the stream closes. Final=true with empty Text — just "close the stream".
-//     The channel is NOT closed: the session lives on and awaits the next input.
-//   - Err != nil only in the very last Chunk before the channel closes:
-//     signals that the process has exited (and with what status).
-//
-// Note: Replace and Final are independent flags. If both are true → text
-// replaces the accumulated value and the stream closes (behavior matches
-// what only Final used to do).
+//   - Kind classifies the chunk (see ChunkKind).
+//   - Text — content for Prose/Activity.
+//   - Replace=true — for Prose/Activity, Text REPLACES the accumulated buffer
+//     instead of appending (opencode sends incremental full-state updates).
+//   - Err != nil only in the very last Chunk before the channel closes: signals
+//     the process has exited (and with what status); Kind is irrelevant then.
 type Chunk struct {
+	Kind    ChunkKind
 	Text    string
 	Replace bool
-	Final   bool
 	Err     error
 }

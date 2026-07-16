@@ -70,7 +70,7 @@ func main() {
 	// send_photo / send_document tools. botSvc satisfies mcp.Sender structurally
 	// (tgbotapi stays inside internal/bot). Per-user routing is by a Bearer token
 	// the backends inject into each agent's MCP client config.
-	mcpSrv := mcp.NewServer(botSvc)
+	mcpSrv := mcp.NewServer(botSvc, store.WorkDirOf)
 	if err := mcpSrv.Listen("127.0.0.1:0"); err != nil {
 		log.Printf("warn: mcp server not started, agents can't send files: %v", err)
 	} else {
@@ -99,6 +99,9 @@ func main() {
 	streamCoord := command.NewStreamCoordinator(replier, func(userID int64) error {
 		return sessionMgr.Interrupt(userID)
 	})
+	// The coordinator also owns ask_user: it displays questions (from the
+	// ordered stream) and collects answers; the MCP handler blocks on it.
+	botSvc.SetPrompter(streamCoord)
 
 	// onChunk: bridge between session.Manager (doesn't know about Telegram) and UI.
 	// Intermediate chunks accumulate in a single message, the final one (Final=true)
@@ -112,7 +115,7 @@ func main() {
 			}
 			return
 		}
-		streamCoord.OnChunk(context.Background(), s.UserID, s.ChatID, chunk.Text, chunk.Replace, chunk.Final)
+		streamCoord.OnChunk(context.Background(), s.UserID, s.ChatID, chunk)
 	}
 
 	// Session manager: per-user, one active session. Shutdown in defer —

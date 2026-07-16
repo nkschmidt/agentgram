@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"log"
 	"sync"
 )
 
@@ -43,8 +44,15 @@ func NewLazyServer(port int, host string) *LazyServer {
 func (l *LazyServer) Get(_ context.Context) (*Server, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.server != nil {
+	if l.server.Alive() {
 		return l.server, nil
+	}
+	// First call, or the previous process died (crash / external kill / a stale
+	// run we couldn't reach). Start a fresh one instead of handing back a dead
+	// server that every request would hit with "connection refused".
+	if l.server != nil {
+		log.Printf("opencode: server not alive, restarting")
+		l.server = nil
 	}
 	s, err := StartServer(l.rootCtx, l.port, l.host)
 	if err != nil {

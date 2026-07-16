@@ -31,6 +31,7 @@ type Server struct {
 	cmd     *exec.Cmd
 	baseURL string
 	token   string
+	done    chan struct{} // closed when the process exits
 
 	mu      sync.Mutex
 	stopped bool
@@ -85,7 +86,29 @@ func StartServer(ctx context.Context, port int, hostname string) (*Server, error
 
 	baseURL := fmt.Sprintf("http://%s", addr)
 	log.Printf("opencode server: ready at %s", baseURL)
-	return &Server{cmd: cmd, baseURL: baseURL, token: token}, nil
+	s := &Server{cmd: cmd, baseURL: baseURL, token: token, done: make(chan struct{})}
+	// One goroutine owns cmd.Wait(); closing done lets LazyServer notice the
+	// process died (so it can restart it) and lets Shutdown wait without a
+	// second, racing Wait.
+	go func() {
+		_ = cmd.Wait()
+		log.Printf("opencode server: process exited")
+		close(s.done)
+	}()
+	return s, nil
+}
+
+// Alive reports whether the server process is still running.
+func (s *Server) Alive() bool {
+	if s == nil {
+		return false
+	}
+	select {
+	case <-s.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // BaseURL — root URL of the server (http://host:port), without trailing slash.
@@ -96,9 +119,10 @@ func (s *Server) BaseURL() string { return s.baseURL }
 // `?directory=...`.
 //
 // Two HTTP clients:
-//   - http (30s timeout) — short operations: session create, abort,
-//     delete. If the server doesn't respond — better to fail fast with
-//     an error in the toast than hang forever.
+//   - http (60s timeout) — short operations: session create, abort, delete.
+//     Usually <2s; the generous ceiling tolerates a cold first session create
+//     (opencode validating a fresh provider/model can briefly take ~30s) rather
+//     than failing it with "Failed to start".
 //   - stream (no timeout) — long-running operations: SSE /event and
 //     POST /message (it's blocking in opencode — returns only when the
 //     model has finished generating; may take minutes).
@@ -106,7 +130,7 @@ func (s *Server) Client(workDir func() string) *Client {
 	return &Client{
 		baseURL: s.baseURL,
 		token:   s.token,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: 60 * time.Second},
 		stream:  &http.Client{Timeout: 0},
 		workDir: workDir,
 	}
@@ -126,7 +150,7 @@ func (s *Server) Shutdown() error {
 		return nil
 	}
 	_ = s.cmd.Process.Signal(os.Interrupt)
-	_ = s.cmd.Wait()
+	<-s.done // the Wait goroutine closes this; cmd.WaitDelay bounds the wait
 	return nil
 }
 

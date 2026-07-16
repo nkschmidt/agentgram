@@ -50,6 +50,12 @@ type Session struct {
 	cancelled atomic.Bool
 }
 
+// Cancelled reports whether the session was closed by command (a backend
+// switch, an explicit Stop, or Shutdown) rather than failing on its own. A
+// blocking Backend.Send that returns after such a close did so because of the
+// switch — the caller should treat that as expected, not an error.
+func (s *Session) Cancelled() bool { return s.cancelled.Load() }
+
 func NewManager(reg *backend.Registry, onChunk ChunkHandler) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{

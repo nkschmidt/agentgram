@@ -74,7 +74,7 @@ func connect(t *testing.T, endpoint, token string) *sdk.ClientSession {
 
 func TestSendPhotoRoutesToUser(t *testing.T) {
 	sender := &stubSender{}
-	srv := NewServer(sender)
+	srv := NewServer(sender, nil)
 	if err := srv.Listen("127.0.0.1:0"); err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -89,8 +89,8 @@ func TestSendPhotoRoutesToUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 3 {
-		t.Fatalf("want 3 tools, got %d", len(tools.Tools))
+	if len(tools.Tools) != len(allTools) {
+		t.Fatalf("want %d tools, got %d", len(allTools), len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &sdk.CallToolParams{
@@ -114,7 +114,7 @@ func TestSendPhotoRoutesToUser(t *testing.T) {
 // emits the same tool call twice in one turn: the file must be delivered once.
 func TestDuplicateSendSuppressed(t *testing.T) {
 	sender := &stubSender{}
-	srv := NewServer(sender)
+	srv := NewServer(sender, nil)
 	if err := srv.Listen("127.0.0.1:0"); err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestDuplicateSendSuppressed(t *testing.T) {
 }
 
 func TestAskUserReturnsAnswer(t *testing.T) {
-	srv := NewServer(&stubSender{})
+	srv := NewServer(&stubSender{}, nil)
 	if err := srv.Listen("127.0.0.1:0"); err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestAskUserReturnsAnswer(t *testing.T) {
 // a tool is registered but missing from --allowedTools (then claude reports it
 // as "unavailable / no permission" and falls back to plain text).
 func TestClaudeConfigWhitelistsEveryTool(t *testing.T) {
-	srv := NewServer(&stubSender{})
+	srv := NewServer(&stubSender{}, nil)
 	if err := srv.Listen("127.0.0.1:0"); err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestClaudeConfigWhitelistsEveryTool(t *testing.T) {
 }
 
 func TestUnknownTokenRejected(t *testing.T) {
-	srv := NewServer(&stubSender{})
+	srv := NewServer(&stubSender{}, nil)
 	if err := srv.Listen("127.0.0.1:0"); err != nil {
 		t.Fatalf("listen: %v", err)
 	}

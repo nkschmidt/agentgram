@@ -42,6 +42,26 @@ func Internal(name string) bool {
 	return strings.Contains(strings.ToLower(name), "agentgram")
 }
 
+// IsAskUser reports whether the tool is the bot's ask_user tool (claude names
+// it mcp__agentgram__ask_user, opencode agentgram_ask_user). Backends turn such
+// a call into a KindQuestion event instead of an activity step.
+func IsAskUser(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "agentgram") && strings.Contains(n, "ask_user")
+}
+
+// AskInput parses an ask_user tool input (the {question, options} object both
+// backends receive in the tool call) so the question can be surfaced as a
+// KindQuestion event. Returns empty question if the input isn't ready yet.
+func AskInput(raw json.RawMessage) (question string, options []string) {
+	var in struct {
+		Question string   `json:"question"`
+		Options  []string `json:"options"`
+	}
+	_ = json.Unmarshal(raw, &in)
+	return in.Question, in.Options
+}
+
 // ToolUse renders a tool call into a string for chat.
 // For example: "📖 Read · /path/to/file" or "💻 Bash · ls -la".
 // If name is empty — "tool" is used. If there's no known emoji for name —

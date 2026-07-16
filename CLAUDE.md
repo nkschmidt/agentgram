@@ -25,9 +25,14 @@ Modular architecture: adding a new backend / command / settings section doesn't 
 - **Backend abstraction:** `Backend{Start, Send, Recv, Interrupt, Stop}` + `Factory(userID)` + `Registry`. Each adapter implements its own protocol.
   - `claude` — per-message `claude -p --output-format stream-json --verbose [--resume <id>]`. Multi-turn via `--resume`. Interrupt = SIGINT through `cmd.Cancel`.
   - `opencode` — HTTP API to a local `opencode serve`. **LazyServer** — one process for all users, started on the first opencode selection. Each user gets their own session on the server. `directory` is passed as a query parameter on every request. SSE for stream, POST `/message` is blocking (no timeout). Interrupt = POST `/abort`.
-- **Response streaming:** one message in the chat, updated via Edit. Typing indicator (re-sent every 4s). An ⏹ Stop button hangs below the message (SIGINT for claude, POST `/abort` for opencode; launched in a goroutine — doesn't block the UI). The final is unified: `Chunk{Text, Final: true}` replaces the accumulated progress.
-- **Agent ↔ user (MCP):** the bot runs a local MCP server (`internal/mcp`, official go-sdk over Streamable HTTP) giving agents three tools — `send_photo` / `send_document` (push a file straight into the chat, separate from the text answer) and `ask_user` (ask a question mid-task, rendered as inline buttons, also answerable by free text). A tool call carries no Telegram identity, so the bot mints a stable per-user Bearer token and the backends inject it into each agent's MCP client config; `getServer` resolves token→userID per request. All three go through `mcp.Bot`, implemented in `internal/bot` (tgbotapi stays locked there).
-  - **ask_user is blocking:** the tool handler calls `Bot.AskUser`, which posts the question and blocks until the user taps a button or types a reply (intercepted in `handleCallback`/`handleMessage` before normal dispatch; commands like `/new_session` are exempt as an escape hatch) or ctx is cancelled (interrupt) / 10-min timeout. This works in headless because the answer returns over the MCP connection, not stdin — claude's native `AskUserQuestion` can't (no way to feed the result back), so it's disabled (`--disallowedTools`) and the agent is steered to `ask_user` via `mcp.AgentGuidance` (claude: `--append-system-prompt`; opencode: per-message `system` field).
+- **Response streaming:** the backend emits ONE ordered stream of typed `Chunk`s per turn (`KindActivity` / `KindProse` / `KindEnd`); `StreamCoordinator` is the only renderer. Roles:
+  - **Activity** (`KindActivity`): ephemeral "⏳" message with tool steps / thinking, edited in place, capped ~3500 runes, removed at each boundary.
+  - **Prose** (`KindProse`): the agent's words — persistent messages, shown live (plain while streaming), split across messages over ~4000 runes, and *sealed* (re-rendered as HTML, no longer edited) at each boundary so the next prose starts a new message below. Surfaces mid-dialogue explanations, not just the final answer.
+  - **Question**: not a chunk. Displayed by `WaitAnswer` (below) when the agent *executes* ask_user. opencode runs the tool *before* flushing the surrounding text, so any prose that streams in while the question is pending is folded INTO the question card (above the question) rather than posted as a separate message below — `❓` card reads "lead-in, then question, then buttons" regardless of arrival order.
+  - The ⏹ Stop button rides on the current *live* message (moved via `EditMarkup`); Stop = SIGINT for claude / POST `/abort` for opencode, in a goroutine. Typing re-sent every 4s.
+- **Agent ↔ user (MCP):** the bot runs a local MCP server (`internal/mcp`, official go-sdk over Streamable HTTP) giving agents four tools — `send_photo` / `send_document` (push a file straight into the chat, separate from the text answer), `ask_user` (ask a question mid-task, rendered as inline buttons, also answerable by free text), and `render_diff` (rasterize the repo's uncommitted changes — `git diff HEAD` + untracked — via `silicon` and deliver them as documents). A tool call carries no Telegram identity, so the bot mints a stable per-user Bearer token and the backends inject it into each agent's MCP client config; `getServer` resolves token→userID per request. `send_*`/`ask_user` go through `mcp.Bot`, implemented in `internal/bot` (tgbotapi stays locked there); `render_diff` shells out through `internal/diffimg` then delivers via `mcp.Bot.SendDocument`.
+  - **render_diff:** input `{dir?}` — the repo to diff; omitted → the user's working dir (`NewServer` takes a `workDirOf(userID)` resolver, wired to `settings.Store.WorkDirOf`). `internal/diffimg.Render` runs read-only `git` (diff/status/ls-files) + `silicon` (GitHub theme; `Diff` lang for the diff, `Markdown` for untracked file dumps), writes PNGs to a temp dir (returns a cleanup func), and the tool sends each as a **document** (no Telegram recompression, crisp text). Requires `git` + `silicon` on the host; errors clearly if `silicon` is absent. Never mutates git state. Replaced the earlier `.claude/skills/diff-image` skill.
+  - **ask_user:** the MCP `Bot.AskUser` handler calls `StreamCoordinator.WaitAnswer(userID, chatID, question, options)`, which seals prose, removes activity, posts the question card (option buttons), and blocks until the user taps a button or types a reply (routed via `prompter.TryAnswerCallback`/`TryAnswerText` in `handleCallback`/`handleMessage`; commands are exempt as an escape hatch) or ctx is cancelled / timeout. Prose arriving while it's pending folds into the card (`foldIntoQuestion`); activity is suppressed. Correlation is by userID (one pending per user). Works in headless because the answer returns over the MCP connection, not stdin — claude's native `AskUserQuestion` can't, so it's disabled (`--disallowedTools`) and the agent is steered to `ask_user` via `mcp.AgentGuidance` (claude: `--append-system-prompt`; opencode: per-message `system` field). opencode cancels MCP tools after 60s, so the per-workdir config sets `experimental.mcp_timeout` to opencode's ~120s ceiling (the answer window).
   - Per-backend MCP wiring:
   - `claude` — per-message subprocess, so per-user `--mcp-config <inline JSON>` + `--allowedTools mcp__agentgram__*`. Fully multi-user-safe.
   - `opencode` — one shared `opencode serve`, so the only per-user hook is the project config: on `Start` the backend writes/merges `<workdir>/opencode.json` with the user's remote-MCP entry. Verified: opencode reads project MCP config per `directory` and connects per session, so this is multi-user-safe too.
@@ -48,7 +53,7 @@ internal/settings/          — JSON Store (AllowedUsers + WorkDirs per-user
 internal/router/            — orchestrator: Message → (command → state → session),
                               Callback → CallbackHandler. Neutral types.
 internal/backend/           — Backend interface + Factory(userID) + Registry.
-                              Chunk{Text, Replace, Final, Err}.
+                              Chunk{Kind, Text, Replace, Err}.
   toolfmt/                  — shared ToolUse(name, input) for rendering tool steps.
   claude/                   — per-message `claude -p`, --resume for multi-turn.
     claude.go               — Backend struct + lifecycle.
@@ -61,8 +66,9 @@ internal/backend/           — Backend interface + Factory(userID) + Registry.
                               Two http.Client: 30s timeout / no timeout.
     sse.go                  — text/event-stream parser.
     opencode.go             — Backend struct + lifecycle.
-    events.go               — consume / updatePart / renderPart / collectFinalText.
-                              Snapshot rebuild with Replace=true; user-echo filtered.
+    events.go               — consume / handleEvent / updatePart. Per-segment
+                              prose/steps (sealedUpTo); ask_user part = segment
+                              boundary; Replace=true snapshots; user-echo filtered.
     models.go               — JSON schemas.
 internal/session/manager.go — Manager: per-user, one active session,
                               auto-stop of the previous with a cancelled flag.
@@ -86,13 +92,18 @@ internal/bot/               — tgbotapi glue (the only package with tgbotapi):
                               answer a pending question (commands exempt).
 internal/mcp/               — local MCP server (official go-sdk, Streamable
                               HTTP) exposing send_photo / send_document /
-                              ask_user to the agents. Per-user routing:
-                              TokenFor(userID) mints a Bearer token,
+                              ask_user / render_diff to the agents. Per-user
+                              routing: TokenFor(userID) mints a Bearer token,
                               getServer(*http.Request) resolves token→userID and
                               returns a per-user server whose tools call Bot.
+                              NewServer(bot, workDirOf) — workDirOf resolves a
+                              user's repo for render_diff.
                               ClaudeMCPConfig / OpencodeConfig build each
                               backend's MCP client config; AgentGuidance is the
                               system-prompt nudge to actually use the tools.
+internal/diffimg/           — Render(dir): git diff HEAD + untracked → PNGs via
+                              silicon (read-only git; temp dir + cleanup func).
+                              Used by mcp render_diff.
 internal/command/           — command layer:
     replier.go              — Replier interface (Send/Edit/SendHTML/EditHTML/
                               Delete/Answer/Typing).
@@ -103,8 +114,10 @@ internal/command/           — command layer:
     markup.go               — MarkdownToHTML for final answers.
     sessions.go             — /new_session: backend pick, current active.
     forwarder.go            — user text → Backend.Send (guard: stream.IsActive).
-    stream.go               — StreamCoordinator: typing + Edit + ⏹ button
-                              (interrupt in a goroutine).
+    stream.go               — StreamCoordinator: the sole renderer. Activity
+                              (ephemeral) / prose (live, sealed, split) /
+                              questions (buttons + WaitAnswer); ⏹ Stop on the
+                              live message (interrupt in a goroutine).
     restart.go              — /restart: syscall.Exec without confirm.
     settings.go             — /settings entry-point + menu + slug dispatcher.
     section_allowed.go      — AllowedUsersSection (depends on AllowedUsersRepo).
@@ -124,10 +137,11 @@ type Backend interface {
     Stop() error       // hard close
 }
 type Chunk struct {
-    Text    string
-    Replace bool  // text replaces accumulated buffer (stream continues)
-    Final   bool  // text replaces + stream closes; Final without Text — close only
-    Err     error
+    Kind    ChunkKind // Prose | Activity | End  (ask_user is not a chunk)
+    Text    string    // Prose/Activity content; Question text
+    Replace bool       // Prose/Activity: replace accumulated buffer (opencode incremental)
+    Options []string   // Question choices
+    Err     error      // set only on the final chunk (process exit)
 }
 type Factory func(userID int64) Backend
 

@@ -40,7 +40,14 @@ func (f *Forwarder) Forward(ctx context.Context, msg router.Message) error {
 	}
 
 	f.stream.Begin(msg.UserID, msg.ChatID)
+	// opencode's Send blocks for the whole turn; if the user switched backends
+	// (or stopped) meanwhile, the session is cancelled and Send returns an error
+	// from the abandoned request — that's expected, not a failure to surface,
+	// and the stream now belongs to the new session, so don't touch it.
 	if err := s.Backend.Send(msg.Text); err != nil {
+		if s.Cancelled() {
+			return nil
+		}
 		f.stream.Finish(msg.UserID)
 		log.Printf("forwarder: send failed for user %d: %v", msg.UserID, err)
 		_, sErr := f.replier.Send(ctx, msg.ChatID, "Failed to send to session: "+err.Error(), nil)

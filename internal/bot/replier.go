@@ -73,6 +73,17 @@ func (r *tgReplier) EditHTML(_ context.Context, chatID int64, messageID int, tex
 	return nil
 }
 
+func (r *tgReplier) EditMarkup(_ context.Context, chatID int64, messageID int, kb command.InlineKeyboard) error {
+	edit := tgbotapi.NewEditMessageReplyMarkup(chatID, messageID, toMarkup(kb))
+	if _, err := r.api.Send(edit); err != nil {
+		if isNotModified(err) {
+			return nil
+		}
+		return fmt.Errorf("edit markup: %w", err)
+	}
+	return nil
+}
+
 func (r *tgReplier) Delete(_ context.Context, chatID int64, messageID int) error {
 	cfg := tgbotapi.NewDeleteMessage(chatID, messageID)
 	if _, err := r.api.Request(cfg); err != nil {
